@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Receipt OCR Scanner & Bill Splitter</title>
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+  <link rel="stylesheet" href="receiptstyle.css">
+</head>
+<body>
+
+  <div class="panel">
+    <div class="nav-links">
+      <a href="audit.html"><button type="button" class="btn-secondary">View Audit History</button></a>
+    </div>
+    <h2>Scan Your Receipt</h2>
+    
+    <!-- DATE & PAYMENT TITLE INPUTS -->
+    <label for="receiptDate"><strong>Receipt Date:</strong></label>
+    <input type="date" id="receiptDate">
+
+    <label for="paymentTitle"><strong>Payment Title (Optional):</strong></label>
+    <input type="text" id="paymentTitle" placeholder="e.g. Weekend Dinner at Cafe">
+
+    <label for="receipt"><strong>Upload Receipt Image:</strong></label>
+    <input type="file" id="receipt" accept="image/png,image/jpeg,image/webp">
+    
+    <p>
+      <button id="scanButton">Scan Receipt with AI</button>
+    </p>
+    <progress id="progress" value="0" max="100"></progress>
+    <p id="status">Choose date, title, and receipt image to begin.</p>
+
+    <h3>Extracted OCR Text</h3>
+    <textarea id="result" placeholder="Scanned text will appear here..."></textarea>
+  </div>
+
+  <!-- TABLE PURCHASE ITEM -->
+  <div class="panel">
+    <h2>Purchased Items</h2>
+    <table id="itemsTable">
+      <thead>
+        <tr>
+          <th>Product Name</th>
+          <th>Quantity</th>
+          <th>Price Each (MMK)</th>
+          <th>Total (MMK)</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody id="itemsBody"></tbody>
+    </table>
+    <button type="button" onclick="addItemRow()">Add Product</button>
+    <h3 id="grandTotal" class="grand-total">Grand Total: 0 MMK</h3>
+  </div>
+
+  <!-- TABLE SPLIT BILL -->
+  <div class="panel">
+    <h2>Divide Items & Split Bill</h2>
+    <table id="splitTable">
+      <thead>
+        <tr>
+          <th>Product</th>
+          <th>Person (Payer)</th>
+          <th>Quantity Used</th>
+          <th>Amount Owed (MMK)</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody id="splitBody"></tbody>
+    </table>
+    <button type="button" onclick="addSplitRow()">Add Split Entry</button>
+    <div id="splitError" class="error-text"></div>
+
+    <h3>Summary Grouped by Payer</h3>
+    <div id="payerSummary"></div>
+
+    <p style="margin-top: 24px;">
+      <button type="button" class="btn-success" onclick="saveToAudit()">Save to Audit History</button>
+    </p>
+  </div>
+
+<script>
+  // Default date to today
+  document.getElementById("receiptDate").valueAsDate = new Date();
+
+  const receipt = document.getElementById("receipt");
+  const scanButton = document.getElementById("scanButton");
+  const result = document.getElementById("result");
+  const status = document.getElementById("status");
+  const progress = document.getElementById("progress");
+
+  // ===== RECEIPT SCANNER =====
+  scanButton.addEventListener("click", async () => {
+    const file = receipt.files[0];
+    if (!file) {
+      status.textContent = "Please choose a receipt image first.";
+      return;
+    }
+
+    scanButton.disabled = true;
+    result.value = "";
+    progress.value = 0;
+    status.textContent = "Starting scanner...";
+
+    let worker;
+    try {
+      worker = await Tesseract.createWorker("eng", 1, {
+        logger: (message) => {
+          if (message.status === "recognizing text") {
+            progress.value = Math.round(message.progress * 100);
+            status.textContent = "Scanning receipt: " + progress.value + "%";
+          }
+        }
+      });
+
+      const output = await worker.recognize(file);
+      const scannedText = output.data.text.trim();
+      result.value = scannedText;
+
+      if (!scannedText) {
+        status.textContent = "No text found. Try a clearer receipt image.";
+        return;
+      }
+
+      status.textContent = "AI is identifying purchased items...";
+      const response = await fetch("/api/parse-receipt", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: scannedText })
+      });
+
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "AI parsing failed.");
+
+      const itemsBody = document.getElementById("itemsBody");
+      itemsBody.innerHTML = "";
+
+      for (const item of data.items) {
+        addItemRow(item.name || "Unknown item", Number(item.quantity) > 0 ? Number(item.quantity) : 1, item.priceEachMMK || 0);
+      }
+
+      updateAll();
+      progress.value = 100;
+      status.textContent = `Done! Found ${data.items.length} items. Please review.`;
+    } catch (error) {
+      console.error("Scanning error:", error);
+      status.textContent = "Error: " + error.message;
+    } finally {
+      if (worker) { try { await worker.terminate(); } catch (e) {} }
+      scanButton.disabled = false;
+    }
+  });
+
+  function addItemRow(name = "", quantity = 1, priceEach = 0) {
+    const tbody = document.getElementById("itemsBody");
+    const row = tbody.insertRow();
+    row.innerHTML = `
+      <td><input type="text" class="item-name" placeholder="Product name" value="${escapeHtml(name)}"></td>
+      <td><input type="number" class="item-quantity" min="0" step="any" value="${quantity}"></td>
+      <td><input type="number" class="item-price" min="0" step="any" value="${priceEach}"></td>
+      <td class="item-total">0</td>
+      <td><button type="button" class="btn-danger" onclick="removeRow(this)">Delete</button></td>
+    `;
+    row.querySelectorAll("input").forEach(input => input.addEventListener("input", updateAll));
+    updateAll();
+  }
+
+  function removeRow(btn) {
+    btn.closest("tr").remove();
+    updateAll();
+  }
+
+  function escapeHtml(str) {
+    return str.replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  function getPurchasedItems() {
+    const items = [];
+    document.querySelectorAll("#itemsBody tr").forEach((row, index) => {
+      const name = row.querySelector(".item-name").value.trim();
+      const quantity = Number(row.querySelector(".item-quantity").value) || 0;
+      const priceEach = Number(row.querySelector(".item-price").value) || 0;
+      const total = quantity * priceEach;
+      row.querySelector(".item-total").textContent = total.toLocaleString(undefined, { maximumFractionDigits: 2 });
+      if (name) items.push({ id: index, name, quantity, priceEach, total });
+    });
+    return items;
+  }
+
+  function addSplitRow(selectedProductName = "", personName = "", quantity = 1) {
+    const tbody = document.getElementById("splitBody");
+    const row = tbody.insertRow();
+    row.innerHTML = `
+      <td><select class="split-product" onchange="updateAll()"><option value="">-- Select Product --</option></select></td>
+      <td><input type="text" placeholder="Payer name" class="split-person" value="${escapeHtml(personName)}" oninput="updateAll()"></td>
+      <td><input type="number" min="0" step="any" value="${quantity}" class="split-quantity" oninput="updateAll()"></td>
+      <td class="split-amount">0</td>
+      <td><button type="button" class="btn-danger" onclick="removeSplitRow(this)">Delete</button></td>
+    `;
+    populateSplitDropdowns();
+    if (selectedProductName) row.querySelector(".split-product").value = selectedProductName;
+    updateAll();
+  }
+
+  function removeSplitRow(btn) {
+    btn.closest("tr").remove();
+    updateAll();
+  }
+
+  function populateSplitDropdowns() {
+    const purchasedItems = getPurchasedItems();
+    const allocatedMap = {};
+    document.querySelectorAll("#splitBody tr").forEach(row => {
+      const prodSelect = row.querySelector(".split-product");
+      const qtyInput = row.querySelector(".split-quantity");
+      if (prodSelect && prodSelect.value) {
+        allocatedMap[prodSelect.value] = (allocatedMap[prodSelect.value] || 0) + (Number(qtyInput.value) || 0);
+      }
+    });
+
+    document.querySelectorAll("#splitBody tr").forEach(row => {
+      const select = row.querySelector(".split-product");
+      const currentSelected = select.value;
+      select.innerHTML = '<option value="">-- Select Product --</option>';
+
+      purchasedItems.forEach(item => {
+        const otherAllocated = (allocatedMap[item.name] || 0) - (currentSelected === item.name ? (Number(row.querySelector(".split-quantity").value) || 0) : 0);
+        const remaining = item.quantity - otherAllocated;
+        const option = document.createElement("option");
+        option.value = item.name;
+        option.disabled = remaining <= 0 && currentSelected !== item.name;
+        option.textContent = `${item.name} (Avail: ${remaining})`;
+        select.appendChild(option);
+      });
+      select.value = currentSelected;
+    });
+  }
+
+  function updateAll() {
+    const purchasedItems = getPurchasedItems();
+    let grandTotal = 0;
+    purchasedItems.forEach(item => grandTotal += item.total);
+    document.getElementById("grandTotal").textContent = "Grand Total: " + grandTotal.toLocaleString(undefined, { maximumFractionDigits: 2 }) + " MMK";
+
+    populateSplitDropdowns();
+    const priceMap = {};
+    purchasedItems.forEach(item => priceMap[item.name] = item.priceEach);
+
+    const payerMap = {};
+    let errorMessages = [];
+    const currentAllocatedMap = {};
+
+    document.querySelectorAll("#splitBody tr").forEach(row => {
+      const prodSelect = row.querySelector(".split-product");
+      const personInput = row.querySelector(".split-person");
+      const qtyInput = row.querySelector(".split-quantity");
+      const amountCell = row.querySelector(".split-amount");
+
+      const prodName = prodSelect ? prodSelect.value : "";
+      const person = personInput ? personInput.value.trim() || "Unassigned" : "Unassigned";
+      const quantity = qtyInput ? Number(qtyInput.value) || 0 : 0;
+      const amount = quantity * (priceMap[prodName] || 0);
+
+      amountCell.textContent = amount.toLocaleString(undefined, { maximumFractionDigits: 2 });
+
+      if (prodName && quantity > 0) {
+        currentAllocatedMap[prodName] = (currentAllocatedMap[prodName] || 0) + quantity;
+        const matchItem = purchasedItems.find(i => i.name === prodName);
+        if (matchItem && currentAllocatedMap[prodName] > matchItem.quantity) {
+          errorMessages.push(`Product "${prodName}" split exceeds total purchased.`);
+          qtyInput.style.borderColor = "#dc2626";
+        } else {
+          qtyInput.style.borderColor = "#cbd5e1";
+        }
+
+        if (!payerMap[person]) payerMap[person] = { items: [], totalPaying: 0 };
+        payerMap[person].items.push({ prodName, quantity, amount });
+        payerMap[person].totalPaying += amount;
+      }
+    });
+
+    document.getElementById("splitError").innerHTML = errorMessages.join("<br>");
+    renderPayerSummary(payerMap);
+  }
+
+  function renderPayerSummary(payerMap) {
+    const container = document.getElementById("payerSummary");
+    const payers = Object.keys(payerMap);
+    if (payers.length === 0) {
+      container.innerHTML = "<p>No split entries added yet.</p>";
+      return;
+    }
+    let html = "";
+    payers.forEach(payer => {
+      const data = payerMap[payer];
+      html += `<div class="summary-card"><h4>Payer: ${escapeHtml(payer)}</h4><ul>`;
+      data.items.forEach(i => html += `<li>${escapeHtml(i.prodName)} — Qty: ${i.quantity} — Amount: ${i.amount.toLocaleString()} MMK</li>`);
+      html += `</ul><p><strong>Total Paying: ${data.totalPaying.toLocaleString()} MMK</strong></p></div>`;
+    });
+    container.innerHTML = html;
+  }
+
+  // ===== SAVE TO AUDIT (LOCALSTORAGE) =====
+  function saveToAudit() {
+    const title = document.getElementById("paymentTitle").value.trim() || "Untitled Payment";
+    const date = document.getElementById("receiptDate").value || new Date().toISOString().split('T')[0];
+    const items = getPurchasedItems();
+
+    if (items.length === 0) {
+      alert("Please add at least one purchased item before saving.");
+      return;
+    }
+
+    // Determine unique payers count from split rows
+    const payersSet = new Set();
+    document.querySelectorAll("#splitBody tr").forEach(row => {
+      const p = row.querySelector(".split-person").value.trim();
+      if (p) payersSet.add(p);
+    });
+    const numberOfPayers = payersSet.size || 1;
+
+    let grandTotal = 0;
+    items.forEach(i => grandTotal += i.total);
+
+    const auditRecord = {
+      id: Date.now(),
+      title,
+      date,
+      numberOfPayers,
+      items,
+      grandTotal
+    };
+
+    let history = JSON.parse(localStorage.getItem("receipt_audit_history") || "[]");
+    history.push(auditRecord);
+    localStorage.setItem("receipt_audit_history", JSON.stringify(history));
+
+    alert("Successfully saved to Audit History!");
+    window.location.href = "audit.html";
+  }
+
+  // Initial rows
+  if (document.querySelectorAll("#itemsBody tr").length === 0) addItemRow("Sample Coffee", 2, 2500);
+  if (document.querySelectorAll("#splitBody tr").length === 0) addSplitRow("Sample Coffee", "Alice", 1);
+</script>
+</body>
+</html>

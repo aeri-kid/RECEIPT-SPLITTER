@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Receipt Audit History</title>
+  <link rel="stylesheet" href="receiptstyle.css">
+</head>
+<body>
+
+  <div class="panel" style="width: 80%;">
+    <div class="nav-links">
+      <a href="index.html"><button type="button" class="btn-secondary">&larr; Back to Scanner</button></a>
+    </div>
+    
+    <h2>Audit History & Past Data</h2>
+    <p>Stored records grouped by Payment Title, Date, and Number of Payers.</p>
+
+      <div style="margin-bottom: 20px;">
+      <button type="button" class="btn-danger" onclick="clearAuditHistory()" style="float: right;">Clear All History</button>
+    </div>
+
+    <!-- GOOGLE DRIVE STYLE TABLE -->
+    <table class="drive-table">
+      <thead>
+        <tr>
+          <th>Payment Group (Title / Date / Payers)</th>
+          <th>Item</th>
+          <th>Quantity</th>
+          <th>Cost (Price Each)</th>
+          <th>Grand Total (Sum)</th>
+        </tr>
+      </thead>
+      <tbody id="auditBody">
+        <!-- Audit rows injected here -->
+      </tbody>
+    </table>
+  </div>
+
+<script>
+  function loadAuditTable() {
+    const tbody = document.getElementById("auditBody");
+    const history = JSON.parse(localStorage.getItem("receipt_audit_history") || "[]");
+
+    if (history.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="5" style="text-align: center; color: #64748b;">No saved audit records found.</td></tr>`;
+      return;
+    }
+
+    let html = "";
+    history.forEach(record => {
+      const groupName = `${record.title} (${record.date})`;
+      const numPayers = record.numberOfPayers;
+      const grandTotalFormatted = record.grandTotal.toLocaleString(undefined, { maximumFractionDigits: 2 }) + " MMK";
+
+      record.items.forEach((item, index) => {
+        const costFormatted = item.priceEach.toLocaleString(undefined, { maximumFractionDigits: 2 }) + " MMK";
+        
+        // Google Drive style: display group info clearly on the first row of each group or repeat cleanly
+        html += `
+          <tr>
+            <td><strong>${escapeHtml(record.title)}</strong><br><small style="color:#64748b;">Date: ${escapeHtml(record.date)} | Payers: ${numPayers}</small></td>
+            <td>${escapeHtml(item.name)}</td>
+            <td>${item.quantity}</td>
+            <td>${costFormatted}</td>
+            <td><strong>${grandTotalFormatted}</strong></td>
+          </tr>
+        `;
+      });
+    });
+
+    tbody.innerHTML = html;
+  }
+
+  function clearAuditHistory() {
+    if (confirm("Are you sure you want to clear all audit history?")) {
+      localStorage.removeItem("receipt_audit_history");
+      loadAuditTable();
+    }
+  }
+
+  function escapeHtml(str) {
+    return String(str).replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  // Load table on page load
+  loadAuditTable();
+</script>
+
+</body>
+</html>
