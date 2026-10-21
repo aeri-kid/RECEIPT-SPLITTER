@@ -6,7 +6,7 @@ const app = express();
 app.use(express.json({ limit: "100kb" }));
 app.use(express.static("public"));
 
-const openai = new OpenAI({ apiKey: "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"});
+const openai = new OpenAI({ apiKey: "Add your own apiKey here"});
 app.post("/api/parse-receipt", async (req, res) => {
   try {
     const text = req.body?.text;
